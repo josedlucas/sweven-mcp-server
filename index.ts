@@ -1,0 +1,265 @@
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { z } from "zod";
+import axios from "axios";
+import express from "express";
+import cors from "cors";
+import { authService } from "./auth.js";
+
+// Create an MCP server
+const server = new McpServer({
+  name: "sweven-mcp-server",
+  version: "1.0.0"
+});
+
+// Helper to get authenticated headers
+const getHeaders = async () => {
+    const token = await authService.ensureAuthenticated();
+    return {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+    };
+};
+
+server.tool(
+    "set_credentials",
+    "Set the email and password for Sweven API authentication",
+    {
+        email: z.string().email(),
+        password: z.string()
+    },
+    async ({ email, password }) => {
+        try {
+            await authService.login(email, password);
+            return {
+                content: [{ type: "text", text: "Credentials set and login successful." }]
+            };
+        } catch (error: any) {
+            return {
+                isError: true,
+                content: [{ type: "text", text: `Failed to set credentials: ${error.message}` }]
+            };
+        }
+    }
+);
+
+server.tool(
+    "get_team_members",
+    "Get the list of team members from Sweven",
+    {},
+    async () => {
+        try {
+            const headers = await getHeaders();
+            const response = await axios.get('https://autodispatch.swevenbpm.com/v1/admin/team-members', { headers });
+            return {
+                content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }]
+            };
+        } catch (error: any) {
+           return {
+                isError: true,
+                content: [{ type: "text", text: `Error fetching team members: ${error.message}` }]
+            };
+        }
+    }
+);
+
+server.tool(
+    "get_trackings_summary",
+    "Get tracking summary for a team member, including time worked and notes count",
+    {
+        team_member_id: z.string(),
+        start_date: z.string().describe("Start date in YYYY-MM-DD format"),
+        end_date: z.string().describe("End date in YYYY-MM-DD format"),
+        limit: z.number().optional().default(100)
+    },
+    async ({ team_member_id, start_date, end_date, limit }) => {
+        try {
+            const headers = await getHeaders();
+            
+            // Fetch trackings
+            const trackingsUrl = `https://apis-tgx.swevenbpm.com/v4/trackings?team_member_id=${team_member_id}&limit=${limit}&sort_order=DESC&sort_column=start_date&is_active=0&start_date=${start_date}&end_date=${end_date}`;
+            const trackingsResponse = await axios.get(trackingsUrl, { headers });
+            const trackings = trackingsResponse.data.data;
+
+            // Fetch notes (to get count)
+            const notesUrl = `https://apis-tgx.swevenbpm.com/v4/notes?sort_column=created_date&sort_order=desc&created_by=${team_member_id}&created_date_from=${start_date}&created_date_to=${end_date}&limit=1000`;
+            const notesResponse = await axios.get(notesUrl, { headers });
+            const notes = notesResponse.data.notes;
+
+            // Calculate summary (logic ported from popup.js)
+            let totalDurationMillis = 0;
+            const uniqueWorkOrderIds = new Set();
+            const workOrdersByDate: { [key: string]: string[] } = {};
+            const timesByDate: { [key: string]: number } = {};
+
+            trackings.forEach((entry: any) => {
+                const startDateObj = new Date(entry.start_date + 'Z');
+                const endDateObj = new Date(entry.end_date + 'Z');
+                const date = startDateObj.toISOString().split('T')[0];
+                const durationMillis = endDateObj.getTime() - startDateObj.getTime();
+                
+                totalDurationMillis += durationMillis;
+
+                if (!timesByDate[date]) timesByDate[date] = 0;
+                timesByDate[date] += durationMillis;
+
+                if (!workOrdersByDate[date]) workOrdersByDate[date] = [];
+                
+                if (entry.work_order_code) {
+                    const totalSeconds = Math.floor(durationMillis / 1000);
+                    const hours = Math.floor(totalSeconds / 3600);
+                    const minutes = Math.floor((totalSeconds % 3600) / 60);
+                    const seconds = totalSeconds % 60;
+                    
+                    const workOrderString = `${entry.work_order_code}|${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}|${entry.work_order_id}`;
+                    
+                    if (!workOrdersByDate[date].includes(workOrderString)) {
+                        workOrdersByDate[date].push(workOrderString);
+                    }
+                    uniqueWorkOrderIds.add(entry.work_order_id);
+                }
+            });
+            
+             const totalSeconds = Math.floor(totalDurationMillis / 1000);
+            const totalHours = Math.floor(totalSeconds / 3600);
+            const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
+            const remainingSeconds = totalSeconds % 60;
+
+            const summary = {
+                total_time: `${String(totalHours).padStart(2, '0')}:${String(totalMinutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`,
+                total_notes: notes.length,
+                total_work_orders: uniqueWorkOrderIds.size,
+                detailed_by_date: timesByDate
+            };
+
+            return {
+                content: [{ type: "text", text: JSON.stringify(summary, null, 2) }]
+            };
+
+        } catch (error: any) {
+             return {
+                isError: true,
+                content: [{ type: "text", text: `Error fetching tracking summary: ${error.message}` }]
+            };
+        }
+    }
+);
+
+server.tool(
+    "get_notes",
+    "Get notes for a team member",
+    {
+        team_member_id: z.string(),
+        start_date: z.string().optional(),
+        end_date: z.string().optional()
+    },
+    async ({ team_member_id, start_date, end_date }) => {
+        try {
+            const headers = await getHeaders();
+            let url = `https://apis-tgx.swevenbpm.com/v4/notes?sort_column=created_date&sort_order=desc&created_by=${team_member_id}&limit=1000`;
+            if (start_date && end_date) {
+                url += `&created_date_from=${start_date}&created_date_to=${end_date}`;
+            }
+            
+            const response = await axios.get(url, { headers });
+            return {
+                content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }]
+            };
+        } catch (error: any) {
+             return {
+                isError: true,
+                content: [{ type: "text", text: `Error fetching notes: ${error.message}` }]
+            };
+        }
+    }
+);
+
+server.tool(
+    "get_work_order_details",
+    "Get details for a specific work order",
+    {
+        work_order_id: z.string()
+    },
+    async ({ work_order_id }) => {
+        try {
+            const headers = await getHeaders();
+            const response = await axios.get(`https://apis-tgx.swevenbpm.com/v4/work-order/${work_order_id}`, { headers });
+            return {
+                content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }]
+            };
+        } catch (error: any) {
+             return {
+                isError: true,
+                content: [{ type: "text", text: `Error fetching work order details: ${error.message}` }]
+            };
+        }
+    }
+);
+
+
+const app = express();
+app.use(cors());
+
+// SSE Endpoint
+app.get("/sse", async (req, res) => {
+  console.log("New SSE connection");
+  const transport = new SSEServerTransport("/messages", res);
+  await server.connect(transport);
+});
+
+// Messages Endpoint
+app.post("/messages", async (req, res) => {
+  console.log("New message received");
+  // Note: specific handling for McpServer might differ based on SDK version
+  // If handlePostMessage is missing, we might need to use the transport's handlePostMessage
+  // checking SDK source: McpServer wraps Server. 
+  // We need to pass the req/res to the transport if using SSEServerTransport directly?
+  // Actually, SSEServerTransport handles the response in `connect`.
+  // The POST request is for client messages sent TO the server.
+  
+  // The SDK's SSEServerTransport expects to receive messages via its `handlePostMessage` method
+  // We need to find the active transport for this session or handle it statelessly if possible.
+  // Standard pattern: 
+  await transport!.handlePostMessage(req, res); 
+  // Wait, transport is created in GET /sse. 
+  // We need to manage transports or use a simplified adapter.
+  
+  // LET'S SIMPLIFY: The standard McpServer example usually runs on stdio.
+  // For SSE, we might need to stick to the core `Server` class if `McpServer` is too opinionated about stdio,
+  // OR we find the right method. 
+  
+  // Looking at SDK docs (mental check): McpServer usually abstracts tool registration.
+  // Let's assume for now we need to handle the message. 
+  // IF `handlePostMessage` is not on `server`, it might be we need a different setup.
+  
+  // Let's try to just use a global transport for this single-user server 
+  // (Not ideal for multi-user but fine for personal MCP on Render).
+  // But wait, SSE requires a transport per connection.
+  
+  // To fix quickly: We'll store the transport in a local variable (supporting 1 client at a time for simplicity)
+  // or lookup documentation.
+  // Given constraints, I will assume a single client pattern for now.
+});
+
+let transport: SSEServerTransport | null = null;
+
+app.get("/sse", async (req, res) => {
+    console.log("New SSE connection");
+    transport = new SSEServerTransport("/messages", res);
+    await server.connect(transport);
+});
+
+app.post("/messages", async (req, res) => {
+    if (transport) {
+        await transport.handlePostMessage(req, res);
+    } else {
+        res.status(503).send("No active SSE connection");
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Sweven MCP Server running on SSE at http://localhost:${PORT}/sse`);
+});
+

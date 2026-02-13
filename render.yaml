@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: sweven-mcp-server
+    env: docker
+    plan: free
+    healthCheckPath: /sse
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+      - key: SWEVEN_EMAIL
+        sync: false
+      - key: SWEVEN_PASSWORD
+        sync: false
+      - key: SWEVEN_TOKEN
+        sync: false
