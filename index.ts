@@ -213,6 +213,7 @@ server.tool(
 // Variable global para mantener el transporte activo
 // Nota: Esto soporta un solo cliente a la vez (suficiente para uso personal)
 let transport: SSEServerTransport | null = null;
+const activeTransports = new Map<string, SSEServerTransport>();
 
 app.get("/sse", async (req, res) => {
     console.log("Estableciendo conexión SSE...");
@@ -229,13 +230,37 @@ app.get("/sse", async (req, res) => {
 });
 
 app.post("/messages", async (req, res) => {
-    // console.log("Mensaje recibido:", req.body); // Útil para depurar
-    if (transport) {
-        // req.body ahora funciona gracias a app.use(express.json()) arriba
-        await transport.handlePostMessage(req, res);
-    } else {
-        res.status(503).json({ error: "No active SSE connection" });
+    // 1. Intentar obtener sessionId de la query string (URL)
+    let sessionId = req.query.sessionId as string;
+
+    // 2. Si no está en la URL, intentar obtenerlo del body (algunos clientes lo mandan ahí)
+    if (!sessionId && req.body && req.body.sessionId) {
+        sessionId = req.body.sessionId;
     }
+
+    // 3. DEBUGGING CRUCIAL: Imprimir todo lo que llega para ver qué está pasando
+    console.log(`POST /messages recibido.`);
+    console.log(`Query Params:`, req.query);
+    console.log(`Body (primeros 100 caracteres):`, JSON.stringify(req.body).substring(0, 100));
+    console.log(`Session ID detectado: "${sessionId}"`);
+
+    if (!sessionId) {
+        console.error("❌ Error: No se encontró sessionId en la petición.");
+        res.status(400).json({ error: "Session ID missing from request" });
+        return;
+    }
+
+    const transport = activeTransports.get(sessionId);
+
+    if (!transport) {
+        console.error(`❌ Error: Sesión ${sessionId} no encontrada en activeTransports.`);
+        console.log("Transportes activos:", Array.from(activeTransports.keys()));
+        res.status(404).json({ error: "Session not found" });
+        return;
+    }
+
+    // Pasamos el mensaje al transporte correcto
+    await transport.handlePostMessage(req, res);
 });
 
 const PORT = process.env.PORT || 3000;
