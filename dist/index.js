@@ -154,22 +154,24 @@ function createSwevenServer() {
 const activeTransports = new Map();
 app.get("/sse", async (req, res) => {
     console.log("Nueva conexión SSE entrante...");
-    // Headers obligatorios para Render
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
-    });
-    // 1. Creamos un servidor NUEVO usando la función fábrica
+    // CORRECCIÓN: Usamos setHeader en lugar de writeHead.
+    // Esto configura los headers "en cola" para que el SDK los envíe cuando arranque.
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // Vital para Render
+    // 1. Creamos un servidor NUEVO
     const server = createSwevenServer();
     // 2. Creamos el transporte con la URL ABSOLUTA
-    // ⚠️ ESTO ES LO QUE ARREGLA EL ERROR DE ANTIGRAVITY ⚠️
-    const transport = new SSEServerTransport("https://sweven-mcp-server.onrender.com/messages", res);
+    // Asegúrate de que esta URL sea EXACTAMENTE la tuya en Render
+    const transport = new SSEServerTransport("/messages", res);
+    // OJO: Si antes te funcionó mejor con la URL completa, usa esa:
+    // const transport = new SSEServerTransport("https://sweven-mcp-server.onrender.com/messages", res);
     // 3. Guardamos la sesión
     console.log(`Sesión iniciada: ${transport.sessionId}`);
     activeTransports.set(transport.sessionId, transport);
     try {
+        // El SDK enviará los headers aquí automáticamente
         await server.connect(transport);
     }
     catch (err) {
