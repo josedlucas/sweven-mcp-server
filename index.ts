@@ -197,34 +197,26 @@ const activeTransports = new Map<string, SSEServerTransport>();
 app.get("/sse", async (req, res) => {
     console.log("Nueva conexión SSE entrante...");
 
-    // CORRECCIÓN: Usamos setHeader en lugar de writeHead.
-    // Esto configura los headers "en cola" para que el SDK los envíe cuando arranque.
+    // Headers correctos usando setHeader (evita el crash de headers sent)
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // Vital para Render
+    res.setHeader("X-Accel-Buffering", "no");
 
-    // 1. Creamos un servidor NUEVO
     const server = createSwevenServer();
 
-    // 2. Creamos el transporte con la URL ABSOLUTA
-    // Asegúrate de que esta URL sea EXACTAMENTE la tuya en Render
-    const transport = new SSEServerTransport("/messages", res);
-    // OJO: Si antes te funcionó mejor con la URL completa, usa esa:
-    // const transport = new SSEServerTransport("https://sweven-mcp-server.onrender.com/messages", res);
+    // 👇 ESTA ES LA CLAVE: URL COMPLETA 👇
+    const transport = new SSEServerTransport("https://sweven-mcp-server.onrender.com/messages", res);
 
-    // 3. Guardamos la sesión
     console.log(`Sesión iniciada: ${transport.sessionId}`);
     activeTransports.set(transport.sessionId, transport);
 
     try {
-        // El SDK enviará los headers aquí automáticamente
         await server.connect(transport);
     } catch (err) {
         console.error("Error conectando servidor:", err);
     }
 
-    // 4. Limpieza al cerrar
     req.on("close", () => {
         console.log(`Cerrando sesión: ${transport.sessionId}`);
         activeTransports.delete(transport.sessionId);
