@@ -1,4 +1,3 @@
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
@@ -6,6 +5,16 @@ import axios from "axios";
 import express from "express";
 import cors from "cors";
 import { authService } from "./auth.js";
+
+// --- CONFIGURACIÓN DEL SERVIDOR EXPRESS ---
+const app = express();
+
+// 1. CORS habilitado
+app.use(cors());
+
+// 2. IMPORTANTE: Middleware para entender JSON
+// Sin esto, el POST /messages falla y da "Session not found"
+app.use(express.json()); 
 
 // Create an MCP server
 const server = new McpServer({
@@ -21,6 +30,8 @@ const getHeaders = async () => {
         'Content-Type': 'application/json'
     };
 };
+
+// --- TUS HERRAMIENTAS (TOOLS) ---
 
 server.tool(
     "set_credentials",
@@ -87,7 +98,7 @@ server.tool(
             const notesResponse = await axios.get(notesUrl, { headers });
             const notes = notesResponse.data.notes;
 
-            // Calculate summary (logic ported from popup.js)
+            // Calculate summary
             let totalDurationMillis = 0;
             const uniqueWorkOrderIds = new Set();
             const workOrdersByDate: { [key: string]: string[] } = {};
@@ -121,7 +132,7 @@ server.tool(
                 }
             });
             
-             const totalSeconds = Math.floor(totalDurationMillis / 1000);
+            const totalSeconds = Math.floor(totalDurationMillis / 1000);
             const totalHours = Math.floor(totalSeconds / 3600);
             const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
             const remainingSeconds = totalSeconds % 60;
@@ -197,69 +208,37 @@ server.tool(
     }
 );
 
+// --- CONFIGURACIÓN SSE Y TRANSPORTE ---
 
-const app = express();
-app.use(cors());
-
-// SSE Endpoint
-app.get("/sse", async (req, res) => {
-  console.log("New SSE connection");
-  const transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
-});
-
-// Messages Endpoint
-app.post("/messages", async (req, res) => {
-  console.log("New message received");
-  // Note: specific handling for McpServer might differ based on SDK version
-  // If handlePostMessage is missing, we might need to use the transport's handlePostMessage
-  // checking SDK source: McpServer wraps Server. 
-  // We need to pass the req/res to the transport if using SSEServerTransport directly?
-  // Actually, SSEServerTransport handles the response in `connect`.
-  // The POST request is for client messages sent TO the server.
-  
-  // The SDK's SSEServerTransport expects to receive messages via its `handlePostMessage` method
-  // We need to find the active transport for this session or handle it statelessly if possible.
-  // Standard pattern: 
-  await transport!.handlePostMessage(req, res); 
-  // Wait, transport is created in GET /sse. 
-  // We need to manage transports or use a simplified adapter.
-  
-  // LET'S SIMPLIFY: The standard McpServer example usually runs on stdio.
-  // For SSE, we might need to stick to the core `Server` class if `McpServer` is too opinionated about stdio,
-  // OR we find the right method. 
-  
-  // Looking at SDK docs (mental check): McpServer usually abstracts tool registration.
-  // Let's assume for now we need to handle the message. 
-  // IF `handlePostMessage` is not on `server`, it might be we need a different setup.
-  
-  // Let's try to just use a global transport for this single-user server 
-  // (Not ideal for multi-user but fine for personal MCP on Render).
-  // But wait, SSE requires a transport per connection.
-  
-  // To fix quickly: We'll store the transport in a local variable (supporting 1 client at a time for simplicity)
-  // or lookup documentation.
-  // Given constraints, I will assume a single client pattern for now.
-});
-
+// Variable global para mantener el transporte activo
+// Nota: Esto soporta un solo cliente a la vez (suficiente para uso personal)
 let transport: SSEServerTransport | null = null;
 
 app.get("/sse", async (req, res) => {
-    console.log("New SSE connection");
+    console.log("Estableciendo conexión SSE...");
+
+    // IMPORTANTE: Headers específicos para Render
+    // 'X-Accel-Buffering: no' evita que Render/Nginx bloquee la conexión
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); 
+
     transport = new SSEServerTransport("/messages", res);
     await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
+    // console.log("Mensaje recibido:", req.body); // Útil para depurar
     if (transport) {
+        // req.body ahora funciona gracias a app.use(express.json()) arriba
         await transport.handlePostMessage(req, res);
     } else {
-        res.status(503).send("No active SSE connection");
+        res.status(503).json({ error: "No active SSE connection" });
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Sweven MCP Server running on SSE at http://localhost:${PORT}/sse`);
+    console.log(`Sweven MCP Server running on SSE at port ${PORT}`);
 });
-
